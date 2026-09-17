@@ -185,7 +185,8 @@ def run_load(args) -> int:
 def verify() -> int:
     """Score each sample alone via decide(), then all of them together via
     decide_batch(), and compare. Runs in-process: needs the venv."""
-    from common import DEFAULT_MODEL, decide, decide_batch, load_model, max_words_for, resolve_device, resolve_model_name
+    from common import (DEFAULT_MODEL, DEFAULT_TASK_LABEL, decide, decide_batch, load_model,
+                        max_words_for, resolve_device, resolve_model_name)
 
     repo = resolve_model_name(DEFAULT_MODEL)
     device = resolve_device("auto")
@@ -194,10 +195,13 @@ def verify() -> int:
     limit = max_words_for(model)
 
     scenarios = load_scenarios(mixed=True)
-    items = [(text, choices) for _name, text, choices in scenarios]
+    # One decision per passage: this checks the axis that must NOT change scores
+    # (separate texts coalesced into one forward pass). The other axis -- several
+    # decisions on one passage -- changes them by design; see decide_batch().
+    items = [(text, [(DEFAULT_TASK_LABEL, choices)]) for _name, text, choices in scenarios]
 
-    single = [decide(model, text, choices, max_len=limit) for text, choices in items]
-    batched = decide_batch(model, items, max_len=limit)
+    single = [decide(model, text, tasks[0][1], max_len=limit) for text, tasks in items]
+    batched = [scored[DEFAULT_TASK_LABEL] for scored in decide_batch(model, items, max_len=limit)]
 
     worst = 0.0
     failed = False

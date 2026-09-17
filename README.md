@@ -137,12 +137,15 @@ curl -s http://localhost:8765/health
 ```json
 {"status":"ok","error":null,"device":"mps",
  "loaded_models":["fastino/gliner2.5-base-v1"],"max_tokens":8192,
- "queue":{"depth":0,"max":64,"busy":false,"max_batch":8},
+ "queue":{"depth":0,"max":64,"busy":false,"max_batch":8,
+         "max_decisions":16,"max_total_choices":120},
  "stats":{"served":1024,"rejected_busy":7,"timed_out":0,"batches":160}}
 ```
 
 `queue` and `stats` describe the inference queue - see
-[Load and concurrency](#load-and-concurrency). `/health` never queues, so it
+[Load and concurrency](#load-and-concurrency). `max_decisions` and
+`max_total_choices` are the caps on a single
+[`POST /api/decide/batch`](#post-apidecidebatch) body. `/health` never queues, so it
 answers in about 1 ms even while the worker is saturated, which makes it a
 usable liveness probe under load.
 
@@ -155,7 +158,8 @@ keeps answering instead of exiting, and `error` carries the reason (`null` when
 {"status":"degraded",
  "error":"Could not preload default model 'nope/does-not-exist': RepositoryNotFoundError: 401 Client Error. (Request ID: Root=1-6aabaef5-...)",
  "device":"mps","loaded_models":[],"max_tokens":8192,
- "queue":{"depth":0,"max":64,"busy":false,"max_batch":8},
+ "queue":{"depth":0,"max":64,"busy":false,"max_batch":8,
+         "max_decisions":16,"max_total_choices":120},
  "stats":{"served":0,"rejected_busy":0,"timed_out":0,"batches":0}}
 ```
 
@@ -178,8 +182,7 @@ curl -s http://localhost:8765/api/models
   "models": [
     {"alias": "multi", "repo": "fastino/gliner2.5-multi-v1", "loaded": false, "max_words": 4096},
     {"alias": "base",  "repo": "fastino/gliner2.5-base-v1",  "loaded": true,  "max_words": 4096},
-    {"alias": "small", "repo": "fastino/gliner2.5-small-v1", "loaded": false, "max_words": 4096},
-    {"alias": "large", "repo": "fastino/gliner2-large-v1",   "loaded": false, "max_words": 1024}
+    {"alias": "small", "repo": "fastino/gliner2.5-small-v1", "loaded": false, "max_words": 4096}
   ]
 }
 ```
@@ -225,7 +228,7 @@ request waited for the inference worker and `timing.batch_size` how many
 requests shared its forward pass - see
 [Load and concurrency](#load-and-concurrency).
 
-`model` must name a known alias (`base`, `multi`, `small`, `large`) or the
+`model` must name a known alias (`base`, `multi`, `small`) or the
 server's own `GLINER_MODEL` repo. Arbitrary Hugging Face repo ids are refused
 with a 400 unless `GLINER_ALLOW_ANY_MODEL=1` is set - see
 [Load and concurrency](#load-and-concurrency) for why.
@@ -289,7 +292,7 @@ identically; only `msg` differs:
 **400 - the requested model is not on the allowlist:**
 
 ```json
-{"detail":"Unknown model 'someone/other-repo'. Allowed: multi, base, small, large. Set GLINER_ALLOW_ANY_MODEL=1 to permit arbitrary Hugging Face repos."}
+{"detail":"Unknown model 'someone/other-repo'. Allowed: multi, base, small. Set GLINER_ALLOW_ANY_MODEL=1 to permit arbitrary Hugging Face repos."}
 ```
 
 **400 - the requested model could not be loaded:**
@@ -310,6 +313,168 @@ identically; only `msg` differs:
 it means the worker is wedged, not that you are queued behind other work. Not
 worth retrying blind - check `/health` and the server log.
 
+### `POST /api/decide/batch`
+
+Several questions about **one** passage, answered in **one forward pass**. The
+situation is sent, counted and encoded once, however many decisions ride on it.
+
+`text` is exactly as above. `decisions` is 1-16 objects, each with its own
+`choices` (2-20, same rules) and at most 120 choices across the whole batch.
+`model` applies to the batch. A decision's optional `name` is echoed back *and*
+used as the model's task label - see below.
+
+```bash
+curl -s -X POST http://localhost:8765/api/decide/batch \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "text": "The vendor missed the last two delivery deadlines and quality inspections show a 12% defect rate. They are our cheapest supplier and switching would take three months.",
+    "decisions": [
+      {"name": "vendor action", "choices": ["keep the current vendor", "switch to a new vendor", "escalate to legal for breach of contract"]},
+      {"name": "urgency",       "choices": ["urgent", "can wait a quarter"]},
+      {"choices": ["tell the board now", "handle it at the team level"]}
+    ]
+  }'
+```
+
+```json
+{
+  "results": [
+    {"index": 0, "name": "vendor action", "task": "vendor action",
+     "best": "switch to a new vendor",
+     "ranked": [
+       {"label": "switch to a new vendor", "confidence": 0.9964410662651062},
+       {"label": "keep the current vendor", "confidence": 0.013312903232872486},
+       {"label": "escalate to legal for breach of contract", "confidence": 0.0011653545079752803}
+     ]},
+    {"index": 1, "name": "urgency", "task": "urgency", "best": "urgent",
+     "ranked": [
+       {"label": "urgent", "confidence": 0.8670076727867126},
+       {"label": "can wait a quarter", "confidence": 0.31603559851646423}
+     ]},
+    {"index": 2, "name": null, "task": "decision 3",
+     "best": "handle it at the team level",
+     "ranked": [
+       {"label": "handle it at the team level", "confidence": 0.262532114982605},
+       {"label": "tell the board now", "confidence": 0.07403106987476349}
+     ]}
+  ],
+  "model": "fastino/gliner2.5-base-v1",
+  "device": "mps",
+  "timing": {"load_s": 0.0, "inference_s": 0.04706758399697719,
+             "queued_s": 0.0003902500029653311, "batch_size": 1},
+  "input": {"words": 30, "max_words": 4096, "tokens": 30, "max_tokens": 8192}
+}
+```
+
+`results` comes back in request order. `input` is one object, not one per
+decision - there is one passage, encoded once. `timing` is the same shape as a
+single request's, because that is what this is: one job, one forward pass.
+`batch_size` still counts *requests* the worker coalesced, not decisions.
+
+It costs one queue slot, not one per decision. Measured against sending the same
+four decisions as four separate requests:
+
+| Passage | One batch | Four separate requests | |
+| --- | --- | --- | --- |
+| 53 words | 0.019 s | 0.049 s | 2.6x |
+| ~640 words | 0.138 s | 0.466 s | 3.4x |
+
+The longer the situation, the more there is to amortise - which is the whole
+point of the endpoint.
+
+#### The decisions are not scored in isolation from each other
+
+This is the trade, and it is not a small one. gliner2 puts every classification
+task in the *same encoder sequence* as the passage, so the decisions in a batch
+attend to one another. A decision's confidences therefore depend on which other
+decisions travelled with it, and differ from what `POST /api/decide` returns for
+that decision on its own.
+
+Scoring one 3-choice decision on a fixed passage while adding unrelated
+companion decisions to the same batch, `base` model:
+
+| Also in the batch | `switch to a new vendor` | `keep the current vendor` | `escalate to legal` |
+| --- | --- | --- | --- |
+| nothing (scored alone) | 0.995393 | 0.004239 | 0.002871 |
+| + urgency | 0.996224 | 0.005049 | 0.005277 |
+| + urgency, audience | 0.992549 | 0.012629 | 0.018767 |
+| + urgency, audience, budget | 0.990948 | 0.016327 | 0.034638 |
+| the same three, reordered | 0.990419 | 0.017962 | 0.034303 |
+
+The ranking survives in that table, but it does not always. Sweeping the five
+`samples/` passages against six two- and three-choice decisions with one to four
+companions, **13 of 120 combinations changed which choice came first.** The
+clearest: on `samples/hiring_candidate.txt`, a decision between `act this week`
+and `act next quarter` answers `act next quarter` (0.187 against 0.092) on its
+own, and `act this week` (0.524 against 0.095) as soon as a single unrelated
+decision joins the batch - and stays flipped with two, three and four.
+
+Close calls are where this bites. A decision whose top choice wins by a wide
+margin is unlikely to move; one that is nearly a tie can go either way depending
+on what it is asked alongside.
+
+What this does and does not mean:
+
+* **Deterministic.** The same batch always returns the same answer. Other
+  clients' traffic never affects it: requests the worker coalesces are separate
+  rows in the batch and cannot see each other, only decisions *within* one
+  request share a sequence. Verified under 24-way concurrent load, delta 0.
+* **Order-sensitive.** Adding, removing or reordering decisions changes all of
+  them. Treat a batch as one question with several parts, not as N independent
+  queries that happen to be posted together.
+* **Group what belongs together.** Questions about the same situation that you
+  would want answered consistently are exactly the right thing to batch. A
+  decision that has to be scored on its own terms belongs in `POST /api/decide`.
+* **A one-decision batch is the single endpoint.** With one unnamed decision the
+  schema is literally the one `POST /api/decide` builds, so the scores are
+  bit-identical. That is a checked property, not a coincidence.
+
+#### `name` is the prompt
+
+A decision's `name` becomes its classification task label, which the model reads
+as part of the prompt - so it is worth naming decisions for the model, not just
+for yourself: `"urgency"` rather than `"q2"`. The label is echoed back as `task`
+so you can always see what was actually asked. Decisions without a `name` are
+labelled `decision 1`, `decision 2` and so on (a lone unnamed decision gets
+plain `decision`, which is what makes the equivalence above hold).
+
+The label does move the numbers, though much less than the company a decision
+keeps. The same decision as the table above, alone in its batch, relabelled
+(the `vendor action` row is that table's first row):
+
+| Task label | `switch to a new vendor` | `keep the current vendor` | `escalate to legal` |
+| --- | --- | --- | --- |
+| `decision` | 0.994460 | 0.007458 | 0.002061 |
+| `vendor action` | 0.995393 | 0.004239 | 0.002871 |
+| `what should we do about the vendor` | 0.979268 | 0.011657 | 0.002149 |
+| `urgency` | 0.993781 | 0.001811 | 0.005347 |
+| `xyzzy` | 0.984925 | 0.011873 | 0.011554 |
+
+Names must be unique within a request, and must not collide with the
+`decision N` label an unnamed decision would get - both are a 422, because the
+label is the key results come back under.
+
+#### Limits and errors
+
+`GLINER_MAX_DECISIONS` (16) and `GLINER_MAX_TOTAL_CHOICES` (120) bound the one
+forward pass a batch becomes. The cost is driven by the total number of labels
+rather than how they are grouped: on a full 4081-word passage, 20 choices - the
+most a single request can ask for, and so a cost this server already accepts -
+takes 4.3 s, 120 choices takes 5.7 s, and the 320 that 16 x 20 would allow takes
+9.4 s. 120 keeps the worst case within a third of an ordinary request's.
+
+Errors are the same as `POST /api/decide`; one passage means one 422 for an
+over-long passage, not one per decision. The batch-specific ones:
+
+```json
+{"detail":[{"type":"too_long","loc":["body","decisions"],
+  "msg":"List should have at most 16 items after validation, not 17"}]}
+{"detail":[{"type":"value_error","loc":["body"],
+  "msg":"Value error, decisions contain 122 choices in total; at most 120 are accepted across one batch"}]}
+{"detail":[{"type":"value_error","loc":["body"],
+  "msg":"Value error, decision names must be unique, and must not collide with the 'decision N' label an unnamed decision is given"}]}
+```
+
 ### From Python (stdlib only)
 
 ```python
@@ -324,6 +489,24 @@ req = urllib.request.Request("http://localhost:8765/api/decide", data=payload,
 print(json.load(urllib.request.urlopen(req))["best"])
 ```
 
+Several questions about the same situation, in one call and one forward pass
+(the decisions influence each other - see
+[above](#the-decisions-are-not-scored-in-isolation-from-each-other)):
+
+```python
+payload = json.dumps({
+    "text": "The team is burned out and the deadline is in two weeks.",
+    "decisions": [
+        {"name": "plan", "choices": ["cut scope", "hire contractors", "push the deadline"]},
+        {"name": "comms", "choices": ["tell the client now", "wait for the next check-in"]},
+    ],
+}).encode()
+req = urllib.request.Request("http://localhost:8765/api/decide/batch", data=payload,
+                             headers={"Content-Type": "application/json"})
+for result in json.load(urllib.request.urlopen(req))["results"]:
+    print(result["name"], "->", result["best"])
+```
+
 ## Input limits
 
 `text` is checked against four caps. All four are enforced server-side, and all
@@ -332,7 +515,7 @@ renders them identically.
 
 | Cap | Limit | What it is for |
 | --- | --- | --- |
-| Words | 4096 (`multi`, `base`, `small`); 1024 (`large`) | The model's *quality* window: `max_len` from its own config. `large` declares none, so 1024 is a conservative fallback. |
+| Words | 4096 | The model's *quality* window: `max_len` from its own config. Every GLiNER2.5 model declares 4096; a repo that declares none (only reachable via `GLINER_ALLOW_ANY_MODEL`) gets a conservative 1024. |
 | Subword tokens | 8192 (`GLINER_MAX_TOKENS`) | The real cost bound, counted with the model's own tokenizer. |
 | Characters | 32 768 | A cheap size guard, applied before anything is counted or tokenized. |
 | Longest run without spaces | 256 characters | One pathological "word" that tokenizes into thousands of subwords. |
@@ -381,6 +564,15 @@ as one batched forward pass (up to `GLINER_MAX_BATCH`). Scores are unaffected -
 batched and unbatched confidences are bit-identical on this machine, which
 `python loadtest.py --verify` checks against all five `samples/`.
 
+**Two kinds of batching, and they are not the same.** The coalescing above puts
+several *requests* in one forward pass as separate rows - padded to a common
+length, unable to see each other, scores unchanged.
+[`POST /api/decide/batch`](#post-apidecidebatch) puts several *decisions* about
+one passage in one row, sharing a single encoder sequence - which is what makes
+it fast and what makes the decisions influence each other. A batch request is
+one job and one queue slot, not N; what bounds its cost is
+`GLINER_MAX_DECISIONS` and `GLINER_MAX_TOTAL_CHOICES`, not the queue.
+
 **Backpressure.** If `GLINER_MAX_QUEUE` jobs are already waiting, a new request
 is refused immediately with `503` and `Retry-After: 2` rather than joining an
 unbounded queue.
@@ -405,6 +597,8 @@ forever.
 | `GLINER_MAX_QUEUE` | `64` | Lower it to fail fast under a stampede (clients get a 503 they can retry instead of a long wait); raise it only if your clients would rather wait than retry. |
 | `GLINER_QUEUE_TIMEOUT` | `60` | Seconds a request may spend *waiting* for the worker; once inference starts it runs to completion. Lower it if your callers have their own short timeouts - the default is generous enough to sit behind a cold model load plus a couple of long passages. |
 | `GLINER_MAX_BATCH` | `8` | Jobs coalesced into one forward pass. `1` disables batching. See the table below; 8 is where the gain flattens on this machine. |
+| `GLINER_MAX_DECISIONS` | `16` | Decisions allowed in one `POST /api/decide/batch`. They share one forward pass, so this and the next row are what bound its cost. |
+| `GLINER_MAX_TOTAL_CHOICES` | `120` | Choices allowed across all the decisions in one batch. The real cost bound: 120 choices on a full-length passage costs 5.7 s against the 4.3 s a single 20-choice request already costs, while `16 x 20 = 320` would cost 9.4 s. |
 | `GLINER_ALLOW_ANY_MODEL` | unset | Set to `1` to accept arbitrary Hugging Face repo ids in `model`. Off by default: the worker is shared, so an unknown repo lets any client make the server download ~1 GB, and with the hub unreachable it pins the worker for minutes of HF retries. Aliases and the server's own `GLINER_MODEL` are always allowed. |
 
 Batching is additionally capped by a padded-word budget (2048 word-slots,
@@ -572,6 +766,8 @@ renaming them would silently ignore every environment and plist already set up:
 | `GLINER_MAX_QUEUE` | `64` | Requests allowed to wait for the inference worker; overflow gets a 503. See [Load and concurrency](#load-and-concurrency). |
 | `GLINER_QUEUE_TIMEOUT` | `60` | Seconds a request may *wait* for the worker before giving up with a 503; once inference starts it runs to completion. |
 | `GLINER_MAX_BATCH` | `8` | Requests coalesced into one forward pass. `1` disables batching. |
+| `GLINER_MAX_DECISIONS` | `16` | Decisions allowed in one `POST /api/decide/batch` body. |
+| `GLINER_MAX_TOTAL_CHOICES` | `120` | Choices allowed across all the decisions in one batch; they share a single forward pass. |
 | `GLINER_ALLOW_ANY_MODEL` | unset | `1` accepts arbitrary Hugging Face repo ids in `model`. Off by default so clients cannot make the shared worker download a random ~1 GB model. |
 
 Example: `GLINER_PORT=9000 GLINER_MODEL=small ./start.sh`
@@ -598,7 +794,6 @@ and list them explicitly.
 | `multi` | `fastino/gliner2.5-multi-v1` | 0.3B | multilingual | GLiNER2.5 |
 | `base` | `fastino/gliner2.5-base-v1` | 0.2B | multilingual | GLiNER2.5, the default |
 | `small` | `fastino/gliner2.5-small-v1` | 74M | multilingual | GLiNER2.5, fastest |
-| `large` | `fastino/gliner2-large-v1` | 0.5B | English only | Older GLiNER2 architecture, 1024-word limit |
 
 Request one per call with `"model": "small"` in the JSON body, `--model small`
 on the CLI, or the dropdown in the web UI; a full repo id such as
@@ -609,7 +804,7 @@ memory until the server restarts. Weights are cached on disk in
 `~/.cache/huggingface`, shared across all copies of this project.
 
 Each model also has its own maximum input length - 4096 words for the GLiNER2.5
-models, 1024 for `large`. `GET /api/models` reports it as `max_words`; see
+models. `GET /api/models` reports it as `max_words`; see
 [Input limits](#input-limits).
 
 ## Troubleshooting

@@ -11,6 +11,11 @@ and every forward pass, because MPS is not safe for concurrent inference.
 Handlers put a job on a bounded FIFO queue and await its future, so a slow
 request never pins a threadpool thread and /health stays instant. Jobs waiting
 for the same, already-loaded model are drained into one batched forward pass.
+POST /api/decide/batch asks several questions about one passage. It is ONE job
+and one forward pass: gliner2 takes several classification tasks in one schema,
+so the passage is encoded once however many decisions ride on it. That sharing
+is not free of consequences -- see decide_batch() in common.py and the handler
+below.
 
 Run ONE process. `uvicorn --workers N` would load N copies of the model and
 have them fight over a single GPU.
@@ -41,6 +46,10 @@ Environment:
                                             that tokenize to ~1 subword per char.
     GLINER_MAX_BATCH       (default 8)      max jobs coalesced into one forward pass.
                                             1 disables batching.
+    GLINER_MAX_DECISIONS   (default 16)     max decisions in one POST /api/decide/batch
+                                            body, and GLINER_MAX_TOTAL_CHOICES (120)
+                                            choices across them. Both bound the cost
+                                            of the single forward pass they share.
     GLINER_ALLOW_ANY_MODEL (default unset)  1 accepts arbitrary Hugging Face repo ids
                                             in `model`. Off by default because the
                                             single worker is shared: an unknown repo
@@ -67,15 +76,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from huggingface_hub.errors import HFValidationError, RepositoryNotFoundError
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from common import (
     DEFAULT_BIND_HOST,
     DEFAULT_MODEL,
     DEFAULT_PORT,
+    DEFAULT_TASK_LABEL,
     MAX_CHOICES,
     MAX_TEXT_CHARS,
+    MAX_DECISIONS as DEFAULT_MAX_DECISIONS,
     MAX_TOKENS,
+    MAX_TOTAL_CHOICES as DEFAULT_MAX_TOTAL_CHOICES,
     MIN_CHOICES,
     MODEL_ALIASES,
     InputTooLong,
@@ -99,6 +111,9 @@ CORS_ORIGINS = [o.strip() for o in os.environ.get("GLINER_CORS_ORIGINS", "").spl
 MAX_QUEUE = int(os.environ.get("GLINER_MAX_QUEUE", "64"))
 QUEUE_TIMEOUT = float(os.environ.get("GLINER_QUEUE_TIMEOUT", "60"))
 MAX_BATCH = max(1, int(os.environ.get("GLINER_MAX_BATCH", "8")))
+MAX_DECISIONS = max(1, int(os.environ.get("GLINER_MAX_DECISIONS", str(DEFAULT_MAX_DECISIONS))))
+MAX_TOTAL_CHOICES = max(MIN_CHOICES, int(os.environ.get("GLINER_MAX_TOTAL_CHOICES",
+                                                        str(DEFAULT_MAX_TOTAL_CHOICES))))
 ALLOW_ANY_MODEL = os.environ.get("GLINER_ALLOW_ANY_MODEL", "").strip().lower() in {"1", "true", "yes", "on"}
 
 # Backstop for a worker that is wedged (a hung load, a driver fault) rather than
@@ -155,7 +170,10 @@ def _input_detail(exc: InputTooLong) -> list[dict]:
 class Job:
     repo: str
     text: str
-    choices: list[str]
+    # (task label, choices) per decision. A single-decision request has exactly
+    # one, labelled DEFAULT_TASK_LABEL; /api/decide/batch has up to
+    # MAX_DECISIONS, and they all share this job's one forward pass.
+    tasks: list[tuple[str, list[str]]]
     future: Future = field(default_factory=Future)
     # Resolved by the worker the moment it commits to running this job, before
     # the model load and the forward pass. GLINER_QUEUE_TIMEOUT is waited on
@@ -167,6 +185,25 @@ class Job:
     # loaded (so the limits were checked there); None means the worker still
     # has to do it.
     info: dict | None = None
+
+    @property
+    def schema_words(self) -> int:
+        """Roughly how many words this job's schema adds to the encoder
+        sequence, on top of the passage.
+
+        The schema is not free padding: task labels and every choice are
+        tokenized into the same sequence as the text, which is why a
+        multi-decision job is wider than its word count suggests. Counted the
+        cheap way (whitespace) because this only has to be good enough to keep
+        BATCH_WORD_BUDGET honest."""
+        return sum(len(label.split()) + sum(len(c.split()) for c in choices) + 1
+                   for label, choices in self.tasks)
+
+    @property
+    def width(self) -> int:
+        """Padded word-slots this job claims in a batch: passage plus schema.
+        Only meaningful once `info` is set."""
+        return self.info["words"] + self.schema_words
 
 
 # Invariant: _pending and _busy are written ONLY while holding _cond (/health
@@ -224,7 +261,7 @@ def _take_batch() -> list[Job] | None:
         # job enqueued before its model finished loading -- unmeasured, so it
         # does not get to join a batch either.
         if head.repo in _models and head.info is not None:
-            longest = head.info["words"]
+            longest = head.width
             while len(batch) < MAX_BATCH and _pending:
                 nxt = _pending[0]
                 if nxt is _STOP:
@@ -234,7 +271,7 @@ def _take_batch() -> list[Job] | None:
                     continue
                 if nxt.repo != head.repo or nxt.info is None:
                     break
-                widest = max(longest, nxt.info["words"])
+                widest = max(longest, nxt.width)
                 if widest * (len(batch) + 1) > BATCH_WORD_BUDGET:
                     break
                 longest = widest
@@ -281,13 +318,15 @@ def _run_batch(jobs: list[Job], started_at: float) -> None:
 
     limit = runnable[0].info["max_words"]
     t0 = time.perf_counter()
-    results = decide_batch(model, [(j.text, j.choices) for j in runnable], max_len=limit)
+    results = decide_batch(model, [(j.text, j.tasks) for j in runnable], max_len=limit)
     inference_s = time.perf_counter() - t0
     _bump("batches")
 
-    for job, ranked in zip(runnable, results):
+    for job, scored in zip(runnable, results):
         job.future.set_result({
-            "ranked": ranked,
+            # {task label: ranked}. One entry for a single-decision request,
+            # one per decision for a batch.
+            "scored": scored,
             "load_s": load_s,
             "inference_s": inference_s,
             "queued_s": started_at - job.enqueued_at,
@@ -386,6 +425,23 @@ truncation:
 Responses report `input.words` / `input.max_words` and `input.tokens` /
 `input.max_tokens`; `max_tokens` is also in `GET /health`.
 
+`POST /api/decide/batch` asks several questions about the *same* passage in one
+call and answers them in **one forward pass**, using gliner2's own multi-task
+schema: the passage is encoded once however many decisions ride on it. On a
+~640-word passage, four decisions (ten choices in total) cost 0.14s that way
+against 0.46s as four separate requests, and the gap widens with the passage.
+
+**The decisions in a batch are not scored in isolation from one another.** Their
+labels share one encoder sequence with the passage and attend to each other, so
+a decision's confidences depend on which other decisions travelled with it and
+differ from what `POST /api/decide` returns for that decision alone. Measured on
+`base`: adding three unrelated decisions moved one choice from 0.0029 to 0.0346,
+and over a sweep of the five sample passages 13 of 120 combinations changed
+which choice ranked first. The same batch always gives the same answer, and
+other clients' traffic never affects it -- but changing, adding or reordering
+the decisions changes all of them. Group questions that belong together; ask
+`POST /api/decide` when a decision must be scored on its own terms.
+
 **One inference worker serves everybody.** Requests queue FIFO and are answered
 in order; jobs waiting for the same loaded model are coalesced into one batched
 forward pass. When the queue is full, or a request waits longer than
@@ -414,39 +470,65 @@ if CORS_ORIGINS:
     )
 
 
-class DecideRequest(BaseModel):
-    text: str = Field(
-        description="The situation to decide on. Stripped of surrounding whitespace; "
-        f"must be non-empty and at most {MAX_TEXT_CHARS} characters, with no "
-        "whitespace-free run longer than 256 characters. Those caps are size guards; "
-        "the real limits are the model's word budget and its subword-token budget "
-        "(see `input.max_words` and `input.max_tokens` in the response). Exceeding "
-        "any of them is a 422.",
-        examples=["The vendor missed the last two delivery deadlines and quality "
-                  "inspections show a 12% defect rate."],
-    )
-    choices: list[str] = Field(
-        description=f"The candidate choices to rank, {MIN_CHOICES}-{MAX_CHOICES} of them. "
-        "Each is stripped and must be non-empty; duplicates are rejected.",
-        examples=[["keep the current vendor", "switch to a new vendor",
-                   "escalate to legal for breach of contract"]],
-    )
-    model: str | None = Field(
+def _clean_text(v: str) -> str:
+    """The `text` validator, shared by both request bodies so a passage is
+    accepted or refused identically whichever endpoint it arrives at."""
+    v = v.strip()
+    if not v:
+        raise ValueError("text must not be empty")
+    if len(v) > MAX_TEXT_CHARS:
+        raise ValueError(f"text must be at most {MAX_TEXT_CHARS} characters")
+    return v
+
+
+TEXT_DESCRIPTION = (
+    "The situation to decide on. Stripped of surrounding whitespace; "
+    f"must be non-empty and at most {MAX_TEXT_CHARS} characters, with no "
+    "whitespace-free run longer than 256 characters. Those caps are size guards; "
+    "the real limits are the model's word budget and its subword-token budget "
+    "(see `input.max_words` and `input.max_tokens` in the response). Exceeding "
+    "any of them is a 422."
+)
+
+TEXT_EXAMPLE = ("The vendor missed the last two delivery deadlines and quality "
+                "inspections show a 12% defect rate.")
+
+CHOICES_EXAMPLE = ["keep the current vendor", "switch to a new vendor",
+                   "escalate to legal for breach of contract"]
+
+
+def _model_field():
+    # A factory, not a shared Field(...) instance: pydantic takes ownership of a
+    # FieldInfo when it builds a model, so handing the same object to two models
+    # is asking for trouble.
+    return Field(
         default=None,
         description=f"Model alias ({', '.join(MODEL_ALIASES)}) or a full Hugging Face repo id. "
         f"Defaults to the server's preloaded model.",
         examples=["base"],
     )
 
+
+def _clean_model(v: str | None) -> str | None:
+    if v is None:
+        return None
+    v = v.strip()
+    return v or None
+
+
+class DecideRequest(BaseModel):
+    text: str = Field(description=TEXT_DESCRIPTION, examples=[TEXT_EXAMPLE])
+    choices: list[str] = Field(
+        description=f"The candidate choices to rank, {MIN_CHOICES}-{MAX_CHOICES} of them. "
+        "Each is stripped and must be non-empty; duplicates are rejected.",
+        examples=[CHOICES_EXAMPLE],
+    )
+    model: str | None = _model_field()
+
     @field_validator("text")
     @classmethod
     def _check_text(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("text must not be empty")
-        if len(v) > MAX_TEXT_CHARS:
-            raise ValueError(f"text must be at most {MAX_TEXT_CHARS} characters")
-        return v
+        return _clean_text(v)
 
     @field_validator("choices")
     @classmethod
@@ -457,10 +539,7 @@ class DecideRequest(BaseModel):
     @field_validator("model")
     @classmethod
     def _check_model(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        v = v.strip()
-        return v or None
+        return _clean_model(v)
 
 
 class ScoredChoice(BaseModel):
@@ -509,6 +588,123 @@ class DecideResponse(BaseModel):
     input: InputInfo
 
 
+class Decision(BaseModel):
+    name: str | None = Field(
+        default=None,
+        description="An optional label for this decision, echoed back on its result so a "
+        "client can match answers to questions without relying on order. Must be unique "
+        "within the request when given.",
+        examples=["vendor action"],
+    )
+    choices: list[str] = Field(
+        description=f"The candidate choices to rank, {MIN_CHOICES}-{MAX_CHOICES} of them. "
+        "Each is stripped and must be non-empty; duplicates are rejected *within* this "
+        "decision. Separate decisions are independent and may repeat each other's choices.",
+        examples=[CHOICES_EXAMPLE],
+    )
+
+    @field_validator("choices")
+    @classmethod
+    def _check_choices(cls, v: list[str]) -> list[str]:
+        return clean_choices(v)
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
+class BatchDecideRequest(BaseModel):
+    text: str = Field(description=TEXT_DESCRIPTION, examples=[TEXT_EXAMPLE])
+    decisions: list[Decision] = Field(
+        min_length=1,
+        max_length=MAX_DECISIONS,
+        description=f"1-{MAX_DECISIONS} questions to ask about `text`, at most "
+        f"{MAX_TOTAL_CHOICES} choices across all of them. They are answered in one "
+        "forward pass and are *not* scored in isolation from each other -- see the "
+        "endpoint description.",
+    )
+    model: str | None = _model_field()
+
+    @field_validator("text")
+    @classmethod
+    def _check_text(cls, v: str) -> str:
+        return _clean_text(v)
+
+    @field_validator("model")
+    @classmethod
+    def _check_model(cls, v: str | None) -> str | None:
+        return _clean_model(v)
+
+    @model_validator(mode="after")
+    def _check_batch(self) -> "BatchDecideRequest":
+        # The whole batch is one forward pass, and its cost is driven by the
+        # total number of labels in the schema rather than by how they are
+        # grouped: 16 decisions of 20 choices is 320 labels and 9.4s on a
+        # full-length passage, against 4.3s for the 20 a single request may ask.
+        total = sum(len(d.choices) for d in self.decisions)
+        if total > MAX_TOTAL_CHOICES:
+            raise ValueError(
+                f"decisions contain {total} choices in total; at most "
+                f"{MAX_TOTAL_CHOICES} are accepted across one batch")
+        # Task labels are the model's prompt AND the key results come back
+        # under, so they have to be distinct -- including against the
+        # "decision N" fallback an unnamed decision gets.
+        labels = task_labels(self.decisions)
+        if len(set(labels)) != len(labels):
+            raise ValueError(
+                "decision names must be unique, and must not collide with the "
+                f"'{DEFAULT_TASK_LABEL} N' label an unnamed decision is given")
+        return self
+
+
+def task_labels(decisions: list[Decision]) -> list[str]:
+    """The classification task label for each decision.
+
+    A decision's `name` when it has one -- the label is the prompt the model
+    sees, so a meaningful name is worth more here than a generated one. Failing
+    that, "decision N" by position, except that a lone unnamed decision gets
+    plain "decision": that makes a one-decision batch request literally the same
+    schema as POST /api/decide, and so the same scores."""
+    if len(decisions) == 1 and decisions[0].name is None:
+        return [DEFAULT_TASK_LABEL]
+    return [d.name if d.name is not None else f"{DEFAULT_TASK_LABEL} {i}"
+            for i, d in enumerate(decisions, 1)]
+
+
+class DecisionResult(BaseModel):
+    index: int = Field(description="Position of this decision in the request's `decisions` "
+                       "array. Results come back in request order; `index` is here so a "
+                       "client that reorders or filters can still map back.", examples=[0])
+    name: str | None = Field(description="The decision's `name`, or null when it had none.",
+                             examples=["vendor action"])
+    task: str = Field(description="The classification task label this decision was scored "
+                      "under -- its `name`, or a generated \"decision N\". This is part of "
+                      "the prompt the model saw, not just a key.", examples=["vendor action"])
+    best: str = Field(description="The highest-scoring choice for this decision.",
+                      examples=["switch to a new vendor"])
+    ranked: list[ScoredChoice] = Field(description="Every choice in this decision with its "
+                                       "score, sorted by confidence descending.")
+
+
+class BatchDecideResponse(BaseModel):
+    results: list[DecisionResult] = Field(
+        description="One result per requested decision, in request order.")
+    model: str = Field(description="The Hugging Face repo id that produced the scores.",
+                       examples=["fastino/gliner2.5-base-v1"])
+    device: str = Field(description="The torch device the model ran on.", examples=["mps"])
+    timing: Timing = Field(description="Exactly as for POST /api/decide: every decision in "
+                           "the batch shared this one forward pass, so there is one set of "
+                           "numbers, and `batch_size` still counts *requests* coalesced by "
+                           "the worker, not decisions.")
+    input: InputInfo = Field(description="How the passage was counted and the limits it was "
+                             "checked against. One object, not one per decision: there is "
+                             "one passage, encoded once.")
+
+
 class ModelInfo(BaseModel):
     alias: str = Field(description="Short name accepted by the `model` request field.", examples=["base"])
     repo: str = Field(description="The Hugging Face repo the alias points at.",
@@ -538,6 +734,12 @@ class QueueInfo(BaseModel):
                        examples=[True])
     max_batch: int = Field(description="GLINER_MAX_BATCH: most jobs coalesced into one forward pass.",
                            examples=[8])
+    max_decisions: int = Field(description="GLINER_MAX_DECISIONS: most decisions allowed in one "
+                               "POST /api/decide/batch body.", examples=[16])
+    max_total_choices: int = Field(description="GLINER_MAX_TOTAL_CHOICES: most choices allowed "
+                                   "across all the decisions in one batch. The batch is a "
+                                   "single forward pass and this is what bounds its cost.",
+                                   examples=[120])
 
 
 class QueueStats(BaseModel):
@@ -594,7 +796,8 @@ def health() -> HealthResponse:
         device=DEVICE,
         loaded_models=list(_models),
         max_tokens=MAX_TOKENS,
-        queue=QueueInfo(depth=len(_pending), max=MAX_QUEUE, busy=_busy, max_batch=MAX_BATCH),
+        queue=QueueInfo(depth=len(_pending), max=MAX_QUEUE, busy=_busy, max_batch=MAX_BATCH,
+                        max_decisions=MAX_DECISIONS, max_total_choices=MAX_TOTAL_CHOICES),
         stats=QueueStats(**stats),
     )
 
@@ -628,47 +831,10 @@ def _resolve_allowed(name: str | None) -> str:
     return repo
 
 
-@app.post(
-    "/api/decide",
-    response_model=DecideResponse,
-    summary="Rank candidate choices against a passage",
-    responses={
-        400: {"description": "The requested model is not allowed, or could not be loaded."},
-        422: {"description": "The request failed validation, or the passage exceeds one of "
-                             "the input size limits (characters, whitespace-free run, the "
-                             "model's word budget, GLINER_MAX_TOKENS subword tokens)."},
-        503: {"description": "The queue is full, or the request waited longer than "
-                             "GLINER_QUEUE_TIMEOUT to be picked up. Both carry a "
-                             "Retry-After header."},
-        504: {"description": "The worker took the job but did not finish within 600s -- it "
-                             "is wedged, not merely slow."},
-    },
-)
-async def api_decide(req: DecideRequest) -> DecideResponse:
-    repo = _resolve_allowed(req.model)
-
-    job = Job(repo=repo, text=req.text, choices=req.choices)
-    model = _models.get(repo)
-    if model is not None:
-        # Already loaded, so the limits are knowable here: reject a doomed
-        # request now instead of letting it wait for the worker. On a thread,
-        # never inline: the word scan is O(text) and its regex backtracks
-        # quadratically on punctuation runs, which froze /health for 21s.
-        try:
-            job.info = await asyncio.to_thread(check_input, model, req.text, repo)
-        except InputTooLong as e:
-            raise HTTPException(status_code=422, detail=_input_detail(e)) from None
-
-    try:
-        _enqueue(job)
-    except QueueFull:
-        _bump("rejected_busy")
-        raise HTTPException(
-            status_code=503,
-            detail=f"Server busy: {MAX_QUEUE} requests already queued. Retry shortly.",
-            headers={"Retry-After": "2"},
-        ) from None
-
+async def _await_job(job: Job, repo: str) -> dict:
+    """Wait for an enqueued job and return its result, or raise the HTTPException
+    the failure deserves. Shared by both decide endpoints, which differ only in
+    what they build from the result."""
     # The queue timeout covers the *wait*, not the work: it stops the moment the
     # worker commits to this job. Timing out a request whose forward pass is
     # already running threw away GPU seconds already spent on it, and the head
@@ -713,10 +879,152 @@ async def api_decide(req: DecideRequest) -> DecideResponse:
         log.exception("Inference failed for %r", repo)
         raise HTTPException(status_code=500, detail="Inference failed. See the server log.") from None
 
+    return out
+
+
+@app.post(
+    "/api/decide",
+    response_model=DecideResponse,
+    summary="Rank candidate choices against a passage",
+    responses={
+        400: {"description": "The requested model is not allowed, or could not be loaded."},
+        422: {"description": "The request failed validation, or the passage exceeds one of "
+                             "the input size limits (characters, whitespace-free run, the "
+                             "model's word budget, GLINER_MAX_TOKENS subword tokens)."},
+        503: {"description": "The queue is full, or the request waited longer than "
+                             "GLINER_QUEUE_TIMEOUT to be picked up. Both carry a "
+                             "Retry-After header."},
+        504: {"description": "The worker took the job but did not finish within 600s -- it "
+                             "is wedged, not merely slow."},
+    },
+)
+async def api_decide(req: DecideRequest) -> DecideResponse:
+    repo = _resolve_allowed(req.model)
+
+    job = Job(repo=repo, text=req.text, tasks=[(DEFAULT_TASK_LABEL, req.choices)])
+    model = _models.get(repo)
+    if model is not None:
+        # Already loaded, so the limits are knowable here: reject a doomed
+        # request now instead of letting it wait for the worker. On a thread,
+        # never inline: the word scan is O(text) and its regex backtracks
+        # quadratically on punctuation runs, which froze /health for 21s.
+        try:
+            job.info = await asyncio.to_thread(check_input, model, req.text, repo)
+        except InputTooLong as e:
+            raise HTTPException(status_code=422, detail=_input_detail(e)) from None
+
+    try:
+        _enqueue(job)
+    except QueueFull:
+        _bump("rejected_busy")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Server busy: {MAX_QUEUE} requests already queued. Retry shortly.",
+            headers={"Retry-After": "2"},
+        ) from None
+
+    out = await _await_job(job, repo)
+
     _bump("served")
+    ranked = out["scored"][DEFAULT_TASK_LABEL]
     return DecideResponse(
-        best=out["ranked"][0]["label"],
-        ranked=[ScoredChoice(**r) for r in out["ranked"]],
+        best=ranked[0]["label"],
+        ranked=[ScoredChoice(**r) for r in ranked],
+        model=repo,
+        device=DEVICE,
+        timing=Timing(load_s=out["load_s"], inference_s=out["inference_s"],
+                      queued_s=out["queued_s"], batch_size=out["batch_size"]),
+        input=InputInfo(words=out["words"], max_words=out["max_words"],
+                        tokens=out["tokens"], max_tokens=out["max_tokens"]),
+    )
+
+
+@app.post(
+    "/api/decide/batch",
+    response_model=BatchDecideResponse,
+    summary="Ask several questions about one passage, in one forward pass",
+    description=(
+        "Several independent questions about the **same** passage, answered in a single "
+        "forward pass: gliner2 takes a list of classification tasks in one schema, so the "
+        "passage is encoded once however many decisions ride on it.\n\n"
+        "**The decisions are not scored in isolation from one another.** Every decision's "
+        "labels sit in the same encoder sequence as the passage and attend to each other, "
+        "so a decision's confidences depend on which other decisions travelled with it, and "
+        "differ from what `POST /api/decide` returns for that decision alone. The same "
+        "batch always gives the same answer -- other clients' requests never affect it -- "
+        "but changing, adding or reordering the decisions changes every one of them. Ask "
+        "questions that belong together, and use `POST /api/decide` when a decision has to "
+        "be scored on its own terms.\n\n"
+        "A decision's `name` is its task label, which is part of the prompt the model sees, "
+        "so it is worth naming decisions meaningfully (`\"urgency\"`, not `\"q2\"`). "
+        "Unnamed decisions are labelled `decision 1`, `decision 2`, and so on."
+    ),
+    responses={
+        400: {"description": "The requested model is not allowed, or could not be loaded."},
+        422: {"description": "The request failed validation, or the passage exceeds one of "
+                             "the input size limits. There is one passage, so it is checked "
+                             "once, exactly as for POST /api/decide."},
+        503: {"description": "The queue is full, or the request waited longer than "
+                             "GLINER_QUEUE_TIMEOUT to be picked up. Both carry a "
+                             "Retry-After header."},
+        504: {"description": "The worker took the job but did not finish within 600s -- it "
+                             "is wedged, not merely slow."},
+    },
+)
+async def api_decide_batch(req: BatchDecideRequest) -> BatchDecideResponse:
+    """One job, one forward pass, N decisions.
+
+    Deliberately one queue slot and not N: the decisions share a single
+    forward pass, so charging the queue per decision would price a batch as if
+    it were a crowd. What it costs instead is bounded by MAX_DECISIONS and
+    MAX_TOTAL_CHOICES, because the schema rides in the encoder sequence with
+    the passage and attention is quadratic in the total length.
+
+    The decisions are not independent in this arrangement -- see the endpoint
+    description and common.decide_batch(). That is the deal the endpoint makes
+    in exchange for encoding the passage once, and it is documented rather than
+    hidden because it can change which choice ranks first.
+    """
+    repo = _resolve_allowed(req.model)
+    labels = task_labels(req.decisions)
+
+    job = Job(repo=repo, text=req.text,
+              tasks=[(label, d.choices) for label, d in zip(labels, req.decisions)])
+    model = _models.get(repo)
+    if model is not None:
+        # Already loaded, so the limits are knowable here: reject a doomed
+        # request now instead of letting it wait for the worker. On a thread,
+        # never inline -- see api_decide.
+        try:
+            job.info = await asyncio.to_thread(check_input, model, req.text, repo)
+        except InputTooLong as e:
+            raise HTTPException(status_code=422, detail=_input_detail(e)) from None
+
+    try:
+        _enqueue(job)
+    except QueueFull:
+        _bump("rejected_busy")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Server busy: {MAX_QUEUE} requests already queued. Retry shortly.",
+            headers={"Retry-After": "2"},
+        ) from None
+
+    out = await _await_job(job, repo)
+
+    _bump("served")
+    scored = out["scored"]
+    return BatchDecideResponse(
+        results=[
+            DecisionResult(
+                index=i,
+                name=decision.name,
+                task=label,
+                best=scored[label][0]["label"],
+                ranked=[ScoredChoice(**r) for r in scored[label]],
+            )
+            for i, (decision, label) in enumerate(zip(req.decisions, labels))
+        ],
         model=repo,
         device=DEVICE,
         timing=Timing(load_s=out["load_s"], inference_s=out["inference_s"],

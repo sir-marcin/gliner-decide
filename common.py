@@ -10,11 +10,16 @@ import re
 from contextlib import contextmanager
 from itertools import islice
 
+# GLiNER2.5 only. The older gliner2-large-v1 used to be aliased here and was
+# dropped: it is a different architecture with a different (undeclared) length
+# budget and English-only coverage, so every limit, every measurement and every
+# statement about multilingual behaviour in this project had to carry an
+# exception for it. Arbitrary repo ids are still reachable through
+# GLINER_ALLOW_ANY_MODEL for anyone who wants one.
 MODEL_ALIASES = {
-    "multi": "fastino/gliner2.5-multi-v1",   # 0.3B, multilingual, GLiNER2.5
-    "base": "fastino/gliner2.5-base-v1",     # 0.2B, multilingual, GLiNER2.5
-    "small": "fastino/gliner2.5-small-v1",   # 74M,  multilingual, GLiNER2.5
-    "large": "fastino/gliner2-large-v1",     # 0.5B, English-only, older GLiNER2 architecture
+    "multi": "fastino/gliner2.5-multi-v1",   # 0.3B, multilingual
+    "base": "fastino/gliner2.5-base-v1",     # 0.2B, multilingual
+    "small": "fastino/gliner2.5-small-v1",   # 74M,  multilingual
 }
 
 DEFAULT_MODEL = "base"
@@ -26,10 +31,10 @@ DEFAULT_BIND_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
 SERVER_HOST = "127.0.0.1"
 
-# Word budget for models whose config.json carries no `max_len`. The only such
-# model we alias is fastino/gliner2-large-v1 (older GLiNER2), whose published
-# limit is 2048 *subword* tokens; 1024 words is a deliberately conservative
-# stand-in, since a word usually costs more than one subword token.
+# Word budget for a model whose config.json carries no `max_len`. Every aliased
+# GLiNER2.5 model declares one (4096), so this is only reachable through
+# GLINER_ALLOW_ANY_MODEL. Deliberately conservative: a word usually costs more
+# than one subword token, so under-guessing the budget only costs quality.
 FALLBACK_MAX_WORDS = 1024
 
 # --- input size limits -------------------------------------------------------
@@ -62,6 +67,22 @@ _BACKTRACKING_RUN = re.compile(r"[A-Za-z0-9._%+\-]+")
 
 MIN_CHOICES = 2
 MAX_CHOICES = 20
+
+# Caps for a multi-decision request (POST /api/decide/batch). Both bound the
+# cost of ONE forward pass, because every decision's labels ride in the same
+# encoder sequence as the passage and attention is quadratic in its length.
+# Measured on `base` with a full 4081-word passage: 20 choices (the most a
+# single-decision request can ask for, and so the cost this server already
+# accepts) takes 4.3s, 120 choices takes 5.7s, and 320 -- the 16 x 20 a naive
+# cap would allow -- takes 9.4s. 120 keeps the worst case within a third of what
+# one ordinary request already costs.
+MAX_DECISIONS = 16
+MAX_TOTAL_CHOICES = 120
+
+# The classification task name used when a request does not supply one. It is
+# part of the prompt the model sees, so it is a fixed, neutral word rather than
+# anything derived from the input.
+DEFAULT_TASK_LABEL = "decision"
 
 
 class InputTooLong(ValueError):
@@ -323,21 +344,40 @@ def cached_max_words(repo: str) -> int | None:
     return int(max_len) if max_len else FALLBACK_MAX_WORDS
 
 
-def decide_batch(model, items: list[tuple[str, list[str]]],
-                 task_label: str = "decision", max_len: int | None = None):
-    """Score several (text, choices) pairs in one forward pass.
+Task = tuple[str, list[str]]        # (task label, choices)
+Item = tuple[str, list[Task]]       # (passage, its decisions)
 
-    batch_extract takes one schema *per text* and formats each result with that
-    text's own classification task, so requests with different choice lists
-    batch together. Returns one sorted list per item, in input order.
+
+def decide_batch(model, items: list[Item], max_len: int | None = None) -> list[dict]:
+    """Score several passages in one forward pass, each against one or more
+    named decisions. Returns one {task_label: ranked} dict per item, in input
+    order, each ranked list sorted best-first.
+
+    This is gliner2's batching used on both of its axes. batch_extract takes one
+    schema *per text*, so unrelated requests ride along as extra rows; and one
+    schema may carry several classification tasks, so a single passage can be
+    asked several questions without being encoded again.
+
+    **The two axes are not equivalent, and the difference matters.** Separate
+    texts are separate rows: they are padded to a common length but cannot see
+    each other, so coalescing requests leaves confidences bit-identical. Several
+    tasks on ONE text share a single encoder sequence and attend to each other,
+    so a decision's confidences depend on which other decisions travel with it.
+    Measured on `base`: adding three unrelated decisions moved one choice's
+    confidence from 0.0029 to 0.0346, and across a sweep of the five sample
+    passages, 13 of 120 combinations changed which choice came first. See the
+    README section on POST /api/decide/batch.
     """
     texts = [text for text, _ in items]
-    schemas = [
-        model.create_schema().classification(
-            task_label, choices, multi_label=True, cls_threshold=0.0
-        )
-        for _, choices in items
-    ]
+    schemas = []
+    for _, tasks in items:
+        schema = model.create_schema()
+        for label, choices in tasks:
+            # multi_label so each choice is scored against the passage on its
+            # own: the values are independent fits, not a distribution.
+            schema = schema.classification(label, choices, multi_label=True,
+                                           cls_threshold=0.0)
+        schemas.append(schema)
     # max_len is a hard backstop: inference does no truncation of its own
     # (gliner2/inference/runtime.py builds an uncapped collator when max_len is
     # None), so without it an over-long passage reaches the encoder in full.
@@ -346,15 +386,20 @@ def decide_batch(model, items: list[tuple[str, list[str]]],
         texts, schemas, batch_size=len(items), threshold=0.0, num_workers=0,
         format_results=True, include_confidence=True, max_len=max_len,
     )
+    # Results come back keyed by task label; gliner2 resolves a task from the
+    # prompt by longest boundary-aware match, so distinct labels stay distinct
+    # even when one is a prefix of another. Callers guarantee distinct labels.
     return [
-        sorted(r.get(task_label, []), key=lambda x: x["confidence"], reverse=True)
-        for r in results
+        {label: sorted(r.get(label, []), key=lambda x: x["confidence"], reverse=True)
+         for label, _ in tasks}
+        for (_, tasks), r in zip(items, results)
     ]
 
 
-def decide(model, text: str, choices: list[str], task_label: str = "decision",
+def decide(model, text: str, choices: list[str], task_label: str = DEFAULT_TASK_LABEL,
            max_len: int | None = None):
-    return decide_batch(model, [(text, choices)], task_label=task_label, max_len=max_len)[0]
+    """One passage, one decision: the ranked list on its own."""
+    return decide_batch(model, [(text, [(task_label, choices)])], max_len=max_len)[0][task_label]
 
 
 def bar(confidence: float, width: int = 30) -> str:
