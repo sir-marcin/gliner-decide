@@ -69,6 +69,15 @@
     padding: 24px 16px 64px;
   }
 
+  /* Single column by default; the two-column split below only kicks in when
+     there is room for both without squeezing either one. */
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 32px;
+    align-items: start;
+  }
+
   header h1 {
     font-size: 1.4rem;
     font-weight: 600;
@@ -219,6 +228,14 @@
 
   #output { margin-top: 24px; }
 
+  .output-head { margin-bottom: 8px; }
+
+  .placeholder {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin: 0;
+  }
+
   .status {
     font-size: 0.9rem;
     color: var(--muted);
@@ -310,6 +327,27 @@
     font-variant-numeric: tabular-nums;
   }
 
+  @media (min-width: 900px) {
+    .wrap { max-width: 1140px; }
+
+    .layout {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 420px);
+      gap: 40px;
+    }
+
+    #output {
+      margin-top: 0;
+      position: sticky;
+      top: 24px;
+      /* Long result lists scroll inside the column instead of pushing the
+         page past the form. */
+      max-height: calc(100vh - 48px);
+      overflow-y: auto;
+      border-left: 1px solid var(--border);
+      padding-left: 24px;
+    }
+  }
+
   @media (max-width: 480px) {
     .wrap { padding-top: 16px; }
     .actions button, .actions select { width: 100%; }
@@ -324,6 +362,7 @@
     <p class="lede">Describe a situation, list the options, and see how well each one fits.</p>
   </header>
 
+  <div class="layout">
   <form id="form" novalidate>
     <div class="field">
       <div class="field-head">
@@ -363,9 +402,12 @@
   </form>
 
   <div id="output" aria-live="polite">
+    <h2 class="output-head">Decision</h2>
+    <p class="placeholder" id="placeholder">Results will appear here once you press Decide.</p>
     <div class="status" id="status" hidden></div>
     <div class="error" id="error" hidden></div>
     <div id="result" hidden></div>
+  </div>
   </div>
 </div>
 
@@ -446,6 +488,7 @@
   var statusEl = document.getElementById("status");
   var errorEl = document.getElementById("error");
   var resultEl = document.getElementById("result");
+  var placeholderEl = document.getElementById("placeholder");
 
   var inFlight = false;
   var rowSeq = 0;
@@ -706,6 +749,12 @@
 
   /* ---------- output helpers ---------- */
 
+  // The output column is always on screen now, so it needs something to say
+  // when it is otherwise empty.
+  function syncPlaceholder() {
+    placeholderEl.hidden = !(statusEl.hidden && errorEl.hidden && resultEl.hidden);
+  }
+
   function clearOutput() {
     statusEl.hidden = true;
     statusEl.textContent = "";
@@ -713,11 +762,13 @@
     while (errorEl.firstChild) errorEl.removeChild(errorEl.firstChild);
     resultEl.hidden = true;
     while (resultEl.firstChild) resultEl.removeChild(resultEl.firstChild);
+    syncPlaceholder();
   }
 
   function setStatus(msg) {
     statusEl.textContent = msg;
     statusEl.hidden = !msg;
+    syncPlaceholder();
   }
 
   function showError(title, lines) {
@@ -731,6 +782,7 @@
       errorEl.appendChild(p);
     });
     errorEl.hidden = false;
+    syncPlaceholder();
   }
 
   function cleanMsg(msg) {
@@ -839,6 +891,7 @@
     resultEl.appendChild(meta);
 
     resultEl.hidden = false;
+    syncPlaceholder();
   }
 
   /* ---------- models ---------- */
