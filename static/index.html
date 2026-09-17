@@ -1,0 +1,1079 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GLiNER Decide</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --panel: #f6f7f9;
+    --panel-2: #eef0f4;
+    --fg: #16181d;
+    --muted: #5d6470;
+    --border: #d7dbe2;
+    --border-strong: #b9bfca;
+    --accent: #2f6fdb;
+    --accent-fg: #ffffff;
+    --bar: #2f6fdb;
+    --bar-track: #e2e6ed;
+    --best-bg: #e8f0fd;
+    --best-border: #2f6fdb;
+    --danger: #c0392b;
+    --danger-bg: #fdecea;
+    --warn: #8a6100;
+    --radius: 8px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --panel: #1c1f25;
+      --panel-2: #23272e;
+      --fg: #e7e9ee;
+      --muted: #9aa2b1;
+      --border: #333842;
+      --border-strong: #4a515d;
+      --accent: #6fa0f5;
+      --accent-fg: #0f1115;
+      --bar: #6fa0f5;
+      --bar-track: #2b3038;
+      --best-bg: #1d2a41;
+      --best-border: #6fa0f5;
+      --danger: #ff8a7a;
+      --danger-bg: #3a1f1c;
+      --warn: #e0b45f;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+                 "Noto Sans", sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  .wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 24px 16px 64px;
+  }
+
+  header h1 {
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin: 0 0 4px;
+    letter-spacing: -0.01em;
+  }
+
+  header p.lede {
+    margin: 0 0 24px;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+
+  h2 {
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin: 0 0 8px;
+  }
+
+  label { font-weight: 500; }
+
+  .sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  textarea, input[type="text"], select {
+    font: inherit;
+    color: var(--fg);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  textarea {
+    min-height: 140px;
+    resize: vertical;
+  }
+
+  select {
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 34px;
+    /* Option text can be longer than the field on a narrow screen; clip it
+       rather than letting the select push the layout wider. */
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+                      linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position: calc(100% - 18px) calc(50% + 1px), calc(100% - 13px) calc(50% + 1px);
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  button {
+    font: inherit;
+    font-weight: 500;
+    color: var(--fg);
+    background: var(--panel-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    padding: 9px 16px;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  button.primary {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+  }
+  button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+
+  .field { margin-bottom: 22px; }
+
+  .field-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 6px;
+  }
+
+  .counter {
+    font-size: 0.8rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .counter.over { color: var(--danger); font-weight: 600; }
+
+  .choice-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+
+  .choice-row input { flex: 1 1 auto; min-width: 0; }
+
+  .remove-btn {
+    flex: 0 0 auto;
+    padding: 9px 12px;
+    line-height: 1;
+    font-size: 1rem;
+  }
+
+  .row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-top: 10px;
+  }
+
+  .hint { font-size: 0.8rem; color: var(--muted); }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 24px 0 0;
+  }
+
+  .warn {
+    font-size: 0.82rem;
+    color: var(--warn);
+    margin-top: 6px;
+  }
+
+  #output { margin-top: 24px; }
+
+  .status {
+    font-size: 0.9rem;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+
+  .error {
+    border: 1px solid var(--danger);
+    background: var(--danger-bg);
+    color: var(--danger);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    font-size: 0.9rem;
+    margin-bottom: 12px;
+  }
+  .error p { margin: 0 0 4px; }
+  .error p:last-child { margin-bottom: 0; }
+  .error strong { display: block; margin-bottom: 6px; color: var(--danger); }
+
+  .best-card {
+    border: 1px solid var(--best-border);
+    background: var(--best-bg);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin-bottom: 20px;
+  }
+  .best-card .best-kicker {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .best-card .best-label {
+    font-size: 1.15rem;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+  .best-card .best-score {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .result-row { margin-bottom: 14px; }
+  .result-row .result-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .result-row .result-label { overflow-wrap: anywhere; }
+  .result-row.is-best .result-label { font-weight: 600; }
+  .result-row .result-pct {
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.9rem;
+    color: var(--muted);
+  }
+  .bar-track {
+    height: 8px;
+    background: var(--bar-track);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    background: var(--bar);
+    border-radius: 4px;
+    opacity: 0.55;
+  }
+  .result-row.is-best .bar-fill { opacity: 1; }
+
+  .note {
+    font-size: 0.82rem;
+    color: var(--muted);
+    margin: 16px 0 0;
+  }
+
+  .meta {
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+  }
+
+  @media (max-width: 480px) {
+    .wrap { padding-top: 16px; }
+    .actions button, .actions select { width: 100%; }
+    .actions { gap: 10px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>GLiNER Decide</h1>
+    <p class="lede">Describe a situation, list the options, and see how well each one fits.</p>
+  </header>
+
+  <form id="form" novalidate>
+    <div class="field">
+      <div class="field-head">
+        <label for="text">Situation</label>
+        <span class="counter" id="counter">0 words</span>
+      </div>
+      <textarea id="text" name="text" rows="7" aria-describedby="word-help"
+        placeholder="Describe the situation you need to decide on. For example: a vendor missed the last two delivery deadlines and quality inspections show a 12% defect rate, but switching suppliers now would delay the launch by two months."></textarea>
+      <p class="hint" id="word-help">Punctuation marks count as words; the exact check happens on Decide.</p>
+      <p class="warn" id="word-limit-hint" aria-live="polite" hidden></p>
+    </div>
+
+    <div class="field">
+      <h2 id="choices-heading">Choices</h2>
+      <div id="choices" role="group" aria-labelledby="choices-heading"></div>
+      <div class="row-actions">
+        <button type="button" id="add-choice">Add choice</button>
+        <span class="hint" id="choices-hint">2 to 20 choices, no duplicates.</span>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="model">Model</label>
+      <select id="model" name="model"></select>
+      <div class="warn" id="model-warning" hidden>Could not reach the server to list models; using the server default.</div>
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="primary" id="decide">Decide</button>
+      <button type="button" id="clear">Clear</button>
+      <label class="sr-only" for="examples">Load an example</label>
+      <select id="examples">
+        <option value="">Load an example…</option>
+      </select>
+    </div>
+    <p class="hint" style="margin-top:10px;">Tip: press Cmd/Ctrl + Enter to decide.</p>
+  </form>
+
+  <div id="output" aria-live="polite">
+    <div class="status" id="status" hidden></div>
+    <div class="error" id="error" hidden></div>
+    <div id="result" hidden></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var MIN_CHOICES = 2;
+  var MAX_CHOICES = 20;
+  var STORAGE_KEY = "gliner-decide-draft-v1";
+
+  // Mirrors of the server's own caps, for the hint and the live counter. The
+  // server enforces them; these only keep the UI honest about what will be
+  // rejected.
+  var MAX_TEXT_CHARS = 32768;   // size guard on the raw passage
+  var MAX_TOKEN_CHARS = 256;    // longest allowed whitespace-free run
+  var MAX_TOKENS = 8192;        // subword tokens, counted with the model's tokenizer
+
+  // Above this the word regex below is too slow to run on every keystroke (it
+  // backtracks quadratically on long punctuation runs). Anything this long is
+  // already far over MAX_TEXT_CHARS, so there is nothing worth counting.
+  var RECOUNT_MAX_CHARS = 40000;
+
+  // Client-side port of gliner2's whitespace word splitter, for the live
+  // counter. It is an approximation - the server does the authoritative count
+  // and rejects an over-long passage with a 422. URLs / emails / @handles stay
+  // whole, \w runs with internal -/_ are one word, every other non-space
+  // character counts on its own ("Hello, world." is 4 words).
+  var WORD_RE = /(?:https?:\/\/\S+|www\.\S+)|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|@[a-z0-9_]+|[\p{L}\p{N}_]+(?:[-_][\p{L}\p{N}_]+)*|\S/giu;
+
+  var ACTIONS = ["retreat to cover", "circle around", "hold position", "advance toward target"];
+
+  var EXAMPLES = [
+    {
+      id: "two_zombies_open_ground",
+      name: "Two zombies, open ground",
+      text: "Two zombies are 8 meters away, moving toward the player. Player is on open ground with a fortified shack 15 meters to the south. Player health is stable.",
+      choices: ACTIONS
+    },
+    {
+      id: "unaware_hostile_rifle",
+      name: "Unaware hostile, scoped rifle",
+      text: "A hostile faction member is 25 meters away, unaware of the player, and standing still behind a low wall. Player is equipped with a scoped rifle and full ammo.",
+      choices: ACTIONS
+    },
+    {
+      id: "single_zombie_machete",
+      name: "Single zombie, machete",
+      text: "A single zombie is 3 meters away, slow-moving, and has not noticed the player. Player is armed with a machete and at full health.",
+      choices: ACTIONS
+    },
+    {
+      id: "raider_flanking_critical",
+      name: "Raider flanking, health critical",
+      text: "A raider is 10 meters away, alerted, flanking from the east. Player is out of ammo, health critical, no cover within reach.",
+      choices: ACTIONS
+    },
+    {
+      id: "horde_fortified",
+      name: "Zombie horde, fortified position",
+      text: "A zombie horde is converging from multiple directions, 20 meters out. Player is inside a fortified structure with a clear firing line through a window.",
+      choices: ACTIONS
+    }
+  ];
+
+  var form = document.getElementById("form");
+  var textEl = document.getElementById("text");
+  var counterEl = document.getElementById("counter");
+  var helpEl = document.getElementById("word-help");
+  var limitHintEl = document.getElementById("word-limit-hint");
+  var choicesEl = document.getElementById("choices");
+  var addBtn = document.getElementById("add-choice");
+  var modelEl = document.getElementById("model");
+  var modelWarnEl = document.getElementById("model-warning");
+  var decideBtn = document.getElementById("decide");
+  var clearBtn = document.getElementById("clear");
+  var examplesEl = document.getElementById("examples");
+  var statusEl = document.getElementById("status");
+  var errorEl = document.getElementById("error");
+  var resultEl = document.getElementById("result");
+
+  var inFlight = false;
+  var rowSeq = 0;
+  var slowTimer = null;
+
+  // Word counting state. wordMax is null when the limit is unknown (the model's
+  // config is not cached on the server yet, or /api/models was unreachable).
+  // wordCount is null when the passage is too long to count (see recount).
+  var wordCount = 0;
+  var wordMax = null;
+  var charsOver = false;
+  var maxWordsByOption = {};   // <option> value -> max_words (or null)
+
+  /* ---------- storage (always guarded) ---------- */
+
+  function storageGet() {
+    try {
+      var raw = window.localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      var parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function storageSet(obj) {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+    } catch (e) { /* storage unavailable or full: drafts are optional */ }
+  }
+
+  function storageClear() {
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch (e) { /* ignore */ }
+  }
+
+  var saveTimer = null;
+  function scheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () {
+      saveTimer = null;
+      storageSet({
+        text: textEl.value,
+        choices: getChoiceValues(),
+        model: modelEl.value
+      });
+    }, 400);
+  }
+
+  /* ---------- choices ---------- */
+
+  function choiceInputs() {
+    return Array.prototype.slice.call(choicesEl.querySelectorAll("input[type=text]"));
+  }
+
+  function getChoiceValues() {
+    return choiceInputs().map(function (i) { return i.value; });
+  }
+
+  function makeRow(value) {
+    rowSeq += 1;
+    var id = "choice-" + rowSeq;
+
+    var row = document.createElement("div");
+    row.className = "choice-row";
+
+    var label = document.createElement("label");
+    label.className = "sr-only";
+    label.setAttribute("for", id);
+    label.textContent = "Choice";
+
+    var input = document.createElement("input");
+    input.type = "text";
+    input.id = id;
+    input.value = value || "";
+    input.setAttribute("placeholder", "A candidate choice");
+
+    input.addEventListener("input", function () {
+      syncFormState();
+      scheduleSave();
+    });
+
+    input.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter" || ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) return;
+      ev.preventDefault();
+      var inputs = choiceInputs();
+      var idx = inputs.indexOf(input);
+      if (idx > -1 && idx < inputs.length - 1) {
+        inputs[idx + 1].focus();
+      } else if (inputs.length < MAX_CHOICES) {
+        var added = addRow("");
+        added.focus();
+      }
+    });
+
+    var remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "remove-btn";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", "Remove choice");
+    remove.setAttribute("title", "Remove choice");
+    remove.addEventListener("click", function () {
+      if (choiceInputs().length <= MIN_CHOICES) return;
+      row.remove();
+      renumber();
+      syncFormState();
+      scheduleSave();
+      var inputs = choiceInputs();
+      if (inputs.length) inputs[inputs.length - 1].focus();
+    });
+
+    row.appendChild(label);
+    row.appendChild(input);
+    row.appendChild(remove);
+    choicesEl.appendChild(row);
+    return input;
+  }
+
+  function addRow(value) {
+    var input = makeRow(value);
+    renumber();
+    syncFormState();
+    return input;
+  }
+
+  function renumber() {
+    var rows = Array.prototype.slice.call(choicesEl.querySelectorAll(".choice-row"));
+    rows.forEach(function (row, i) {
+      var label = row.querySelector("label");
+      var input = row.querySelector("input");
+      var btn = row.querySelector("button");
+      if (label) label.textContent = "Choice " + (i + 1);
+      if (input) input.setAttribute("aria-label", "Choice " + (i + 1));
+      if (btn) {
+        btn.setAttribute("aria-label", "Remove choice " + (i + 1));
+        btn.setAttribute("title", "Remove choice " + (i + 1));
+      }
+    });
+  }
+
+  function setChoices(values) {
+    while (choicesEl.firstChild) choicesEl.removeChild(choicesEl.firstChild);
+    var list = (values && values.length) ? values.slice(0, MAX_CHOICES) : ["", "", ""];
+    while (list.length < MIN_CHOICES) list.push("");
+    list.forEach(function (v) { makeRow(v); });
+    renumber();
+    syncFormState();
+  }
+
+  /* ---------- word count ---------- */
+
+  function num(n) {
+    return Number(n).toLocaleString("en-US");
+  }
+
+  function estimateWords(text) {
+    var m = String(text).match(WORD_RE);
+    return m ? m.length : 0;
+  }
+
+  function plural(n, one, many) {
+    return num(n) + " " + (Math.abs(n) === 1 ? one : many);
+  }
+
+  function isOverLimit() {
+    return typeof wordMax === "number" && typeof wordCount === "number" && wordCount > wordMax;
+  }
+
+  // The limits line under the box. The word budget is the selected model's, so
+  // this re-renders whenever the model changes.
+  function renderHint() {
+    var words = (typeof wordMax === "number")
+      ? num(wordMax) + " words (per model)"
+      : "the model's word budget";
+    helpEl.textContent = "Limits: " + words + ", " + num(MAX_TOKENS)
+      + " subword tokens, " + num(MAX_TEXT_CHARS) + " characters, no run over "
+      + num(MAX_TOKEN_CHARS) + " characters without spaces. Punctuation marks "
+      + "count as words; the exact check happens on Decide.";
+  }
+
+  function renderCounter() {
+    if (wordCount === null) {
+      // Too long to count in the browser - and far past the character cap, so
+      // the character limit is the useful thing to say.
+      counterEl.textContent = "≈ too long (over " + num(MAX_TEXT_CHARS) + " characters)";
+    } else {
+      // Always "≈": this is a client-side approximation of gliner2's splitter.
+      // The authoritative count is the server's, made when Decide is clicked.
+      counterEl.textContent = (typeof wordMax === "number")
+        ? "≈ " + num(wordCount) + " / " + num(wordMax) + " words"
+        : "≈ " + plural(wordCount, "word", "words");
+    }
+
+    var over = isOverLimit();
+    counterEl.classList.toggle("over", over || charsOver);
+
+    if (charsOver) {
+      limitHintEl.textContent = "Over the " + num(MAX_TEXT_CHARS)
+        + "-character limit — the server will reject this on Decide.";
+    } else if (over) {
+      limitHintEl.textContent = "≈ " + plural(wordCount - wordMax, "word", "words")
+        + " over the limit — the server will reject this on Decide.";
+    } else {
+      limitHintEl.textContent = "";
+    }
+    limitHintEl.hidden = !(over || charsOver);
+  }
+
+  // Recount from the textarea, instantly. No network: the estimate is cheap
+  // enough to run on every keystroke - as long as we never hand the regex a
+  // passage big enough for its backtracking to matter (a 100k-character run of
+  // punctuation takes seconds), which a paste easily is.
+  function recount() {
+    var text = textEl.value;
+    charsOver = text.length > MAX_TEXT_CHARS;
+    wordCount = (text.length > RECOUNT_MAX_CHARS) ? null : estimateWords(text);
+    var known = maxWordsByOption[modelEl.value];
+    wordMax = (typeof known === "number") ? known : null;
+    renderHint();
+    renderCounter();
+    syncFormState();
+  }
+
+  /* ---------- form state ---------- */
+
+  function nonEmptyChoiceCount() {
+    return getChoiceValues().filter(function (v) { return v.trim() !== ""; }).length;
+  }
+
+  // The word estimate deliberately does not gate the button: it is only an
+  // approximation, so an over-limit passage still submits and the server's 422
+  // has the last word.
+  function formIsValid() {
+    return textEl.value.trim() !== "" && nonEmptyChoiceCount() >= MIN_CHOICES;
+  }
+
+  function firstInvalidField() {
+    if (textEl.value.trim() === "") return textEl;
+    var inputs = choiceInputs();
+    for (var i = 0; i < inputs.length; i += 1) {
+      if (inputs[i].value.trim() === "") return inputs[i];
+    }
+    return inputs.length ? inputs[0] : textEl;
+  }
+
+  function syncFormState() {
+    var count = choiceInputs().length;
+    addBtn.disabled = count >= MAX_CHOICES;
+    Array.prototype.forEach.call(choicesEl.querySelectorAll(".remove-btn"), function (b) {
+      b.disabled = count <= MIN_CHOICES;
+    });
+
+    decideBtn.disabled = inFlight || !formIsValid();
+    decideBtn.textContent = inFlight ? "Deciding…" : "Decide";
+  }
+
+  /* ---------- output helpers ---------- */
+
+  function clearOutput() {
+    statusEl.hidden = true;
+    statusEl.textContent = "";
+    errorEl.hidden = true;
+    while (errorEl.firstChild) errorEl.removeChild(errorEl.firstChild);
+    resultEl.hidden = true;
+    while (resultEl.firstChild) resultEl.removeChild(resultEl.firstChild);
+  }
+
+  function setStatus(msg) {
+    statusEl.textContent = msg;
+    statusEl.hidden = !msg;
+  }
+
+  function showError(title, lines) {
+    while (errorEl.firstChild) errorEl.removeChild(errorEl.firstChild);
+    var strong = document.createElement("strong");
+    strong.textContent = title;
+    errorEl.appendChild(strong);
+    lines.forEach(function (line) {
+      var p = document.createElement("p");
+      p.textContent = line;
+      errorEl.appendChild(p);
+    });
+    errorEl.hidden = false;
+  }
+
+  function cleanMsg(msg) {
+    return String(msg).replace(/^Value error,\s*/, "");
+  }
+
+  function pct(conf) {
+    return (conf * 100).toFixed(1) + "%";
+  }
+
+  function renderResult(data) {
+    while (resultEl.firstChild) resultEl.removeChild(resultEl.firstChild);
+
+    var ranked = Array.isArray(data.ranked) ? data.ranked : [];
+    var bestEntry = ranked.length ? ranked[0] : null;
+
+    var card = document.createElement("div");
+    card.className = "best-card";
+    var kicker = document.createElement("div");
+    kicker.className = "best-kicker";
+    kicker.textContent = "Best fit";
+    var bestLabel = document.createElement("div");
+    bestLabel.className = "best-label";
+    bestLabel.textContent = data.best || (bestEntry ? bestEntry.label : "");
+    card.appendChild(kicker);
+    card.appendChild(bestLabel);
+    if (bestEntry) {
+      var bestScore = document.createElement("div");
+      bestScore.className = "best-score";
+      bestScore.textContent = pct(bestEntry.confidence) + " confidence";
+      card.appendChild(bestScore);
+    }
+    resultEl.appendChild(card);
+
+    var heading = document.createElement("h2");
+    heading.textContent = "All choices";
+    resultEl.appendChild(heading);
+
+    ranked.forEach(function (item, i) {
+      var row = document.createElement("div");
+      row.className = "result-row" + (i === 0 ? " is-best" : "");
+
+      var head = document.createElement("div");
+      head.className = "result-head";
+
+      var lab = document.createElement("span");
+      lab.className = "result-label";
+      lab.textContent = item.label;
+
+      var p = document.createElement("span");
+      p.className = "result-pct";
+      p.textContent = pct(item.confidence);
+
+      head.appendChild(lab);
+      head.appendChild(p);
+
+      var track = document.createElement("div");
+      track.className = "bar-track";
+      track.setAttribute("role", "img");
+      track.setAttribute("aria-label", item.label + ": " + pct(item.confidence) + " confidence");
+      var fill = document.createElement("div");
+      fill.className = "bar-fill";
+      var width = Math.max(0, Math.min(1, Number(item.confidence) || 0)) * 100;
+      fill.style.width = width.toFixed(2) + "%";
+      track.appendChild(fill);
+
+      row.appendChild(head);
+      row.appendChild(track);
+      resultEl.appendChild(row);
+    });
+
+    var note = document.createElement("p");
+    note.className = "note";
+    note.textContent = "Scores are independent per choice and do not sum to 100%.";
+    resultEl.appendChild(note);
+
+    var meta = document.createElement("div");
+    meta.className = "meta";
+    var timing = data.timing || {};
+    var parts = [
+      String(data.model || ""),
+      String(data.device || ""),
+      "inference " + Math.round((Number(timing.inference_s) || 0) * 1000) + " ms"
+    ];
+    if (Number(timing.load_s) > 0) {
+      parts.push("model load " + Number(timing.load_s).toFixed(1) + " s");
+    }
+    if (Number(timing.queued_s) >= 0.05) {
+      parts.push("queued " + Math.round(Number(timing.queued_s) * 1000) + " ms");
+    }
+    if (Number(timing.batch_size) > 1) {
+      parts.push("batch of " + Number(timing.batch_size));
+    }
+    var input = data.input;
+    if (input && typeof input.words === "number") {
+      parts.push(typeof input.max_words === "number"
+        ? num(input.words) + " / " + num(input.max_words) + " words"
+        : plural(input.words, "word", "words"));
+    }
+    if (input && typeof input.tokens === "number") {
+      parts.push(typeof input.max_tokens === "number"
+        ? num(input.tokens) + " / " + num(input.max_tokens) + " tokens"
+        : plural(input.tokens, "token", "tokens"));
+    }
+    meta.textContent = parts.join(" · ");
+    resultEl.appendChild(meta);
+
+    resultEl.hidden = false;
+  }
+
+  /* ---------- models ---------- */
+
+  function fallbackModels() {
+    maxWordsByOption = {};
+    var opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "Server default";
+    modelEl.appendChild(opt);
+    modelWarnEl.hidden = false;
+  }
+
+  function loadModels(preferred) {
+    return fetch("/api/models", { headers: { "Accept": "application/json" } })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        while (modelEl.firstChild) modelEl.removeChild(modelEl.firstChild);
+        var models = Array.isArray(data.models) ? data.models : [];
+        if (!models.length) throw new Error("no models");
+        maxWordsByOption = {};
+
+        // The server default may be a repo id that matches no alias, so it gets
+        // its own option rather than being mapped onto one. Selecting it omits
+        // `model` from the request, which is the only way to be sure the UI
+        // uses the same model the server preloaded.
+        var def = data.default ? String(data.default) : "";
+        var defEntry = null;
+        models.forEach(function (m) {
+          if (!defEntry && (m.alias === def || m.repo === def)) defEntry = m;
+        });
+        var defOpt = document.createElement("option");
+        defOpt.value = "";
+        // Short on purpose: the full repo id is clipped on a narrow screen.
+        // When the server's default maps to a known alias, name the alias.
+        defOpt.textContent = "Server default · " + (defEntry ? defEntry.alias : (def || "unknown"));
+        modelEl.appendChild(defOpt);
+        maxWordsByOption[""] = defEntry && typeof defEntry.max_words === "number"
+          ? defEntry.max_words : null;
+
+        models.forEach(function (m) {
+          var opt = document.createElement("option");
+          opt.value = m.alias;
+          opt.textContent = m.alias + " — " + m.repo + (m.loaded ? " (loaded)" : " (not loaded)");
+          modelEl.appendChild(opt);
+          maxWordsByOption[m.alias] = typeof m.max_words === "number" ? m.max_words : null;
+        });
+        modelWarnEl.hidden = true;
+
+        modelEl.value = (preferred && hasOption(preferred)) ? preferred : "";
+      })
+      .catch(function () {
+        while (modelEl.firstChild) modelEl.removeChild(modelEl.firstChild);
+        fallbackModels();
+      });
+  }
+
+  function hasOption(value) {
+    return Array.prototype.some.call(modelEl.options, function (o) { return o.value === value; });
+  }
+
+  /* ---------- decide ---------- */
+
+  function decide() {
+    if (inFlight) return;
+
+    // Cmd/Ctrl+Enter bypasses the disabled button, so re-check here rather than
+    // posting a request the server can only answer with a validation error.
+    if (!formIsValid()) {
+      var bad = firstInvalidField();
+      if (bad) bad.focus();
+      return;
+    }
+
+    clearOutput();
+    inFlight = true;
+    syncFormState();
+    setStatus("Deciding…");
+
+    if (slowTimer) clearTimeout(slowTimer);
+    slowTimer = setTimeout(function () {
+      slowTimer = null;
+      // Deliberately covers both slow paths: a cold model load, and simply
+      // waiting in the FIFO queue behind other people's requests.
+      if (inFlight) setStatus("Still working — the server may be loading a model or serving other requests…");
+    }, 1500);
+
+    // Blank rows are padding in the UI, not choices: sending them would fail
+    // validation with "choices must not contain empty strings".
+    var payload = {
+      text: textEl.value,
+      choices: getChoiceValues().filter(function (v) { return v.trim() !== ""; })
+    };
+    // An empty selection means "server default": omit `model` entirely.
+    if (modelEl.value) payload.model = modelEl.value;
+
+    var finish = function () {
+      inFlight = false;
+      if (slowTimer) { clearTimeout(slowTimer); slowTimer = null; }
+      syncFormState();
+    };
+
+    fetch("/api/decide", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (response) {
+      return response.text().then(function (body) {
+        var data = null;
+        try { data = body ? JSON.parse(body) : null; } catch (e) { data = null; }
+        return { ok: response.ok, status: response.status, data: data, body: body };
+      });
+    }).then(function (res) {
+      finish();
+      setStatus("");
+
+      if (res.ok && res.data) {
+        renderResult(res.data);
+        // The model we just used may have gone from "not loaded" to "loaded".
+        if (modelWarnEl.hidden) loadModels(modelEl.value).then(recount);
+        return;
+      }
+
+      var detail = res.data ? res.data.detail : null;
+
+      if (res.status === 503) {
+        var busy = typeof detail === "string" ? detail : "";
+        var queued = busy.match(/(\d+)\s+requests already queued/);
+        showError("Server busy", [queued
+          ? "Server is busy (" + queued[1] + " queued). Try again in a moment."
+          : (busy || "Server is busy. Try again in a moment.")]);
+        return;
+      }
+
+      if (res.status === 422 && Array.isArray(detail)) {
+        var lines = detail.map(function (d) {
+          return cleanMsg(d && d.msg ? d.msg : "Invalid input");
+        });
+        showError("Please fix the following:", lines.length ? lines : ["Invalid input."]);
+        return;
+      }
+
+      if (typeof detail === "string" && detail) {
+        showError("Request failed (" + res.status + ")", [detail]);
+        return;
+      }
+
+      showError("Request failed (" + res.status + ")", [res.body ? res.body.slice(0, 500) : "Unknown error."]);
+    }).catch(function () {
+      finish();
+      setStatus("");
+      showError("Server unreachable", [
+        "Could not reach the server. Check that it is running and reachable from this device."
+      ]);
+    });
+  }
+
+  /* ---------- wiring ---------- */
+
+  textEl.addEventListener("input", function () {
+    recount();
+    scheduleSave();
+  });
+
+  addBtn.addEventListener("click", function () {
+    if (choiceInputs().length >= MAX_CHOICES) return;
+    addRow("").focus();
+    scheduleSave();
+  });
+
+  // Different models have different word limits, so a model change re-counts.
+  modelEl.addEventListener("change", function () {
+    scheduleSave();
+    recount();
+  });
+
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    decide();
+  });
+
+  form.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
+      ev.preventDefault();
+      decide();
+    }
+  });
+
+  clearBtn.addEventListener("click", function () {
+    textEl.value = "";
+    setChoices(["", "", ""]);
+    examplesEl.value = "";
+    clearOutput();
+    storageClear();
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    recount();
+    textEl.focus();
+  });
+
+  EXAMPLES.forEach(function (ex) {
+    var opt = document.createElement("option");
+    opt.value = ex.id;
+    opt.textContent = ex.name;
+    examplesEl.appendChild(opt);
+  });
+
+  examplesEl.addEventListener("change", function () {
+    var id = examplesEl.value;
+    if (!id) return;
+    var ex = null;
+    EXAMPLES.forEach(function (e) { if (e.id === id) ex = e; });
+    if (!ex) return;
+    textEl.value = ex.text;
+    setChoices(ex.choices.slice());
+    clearOutput();
+    recount();
+    scheduleSave();
+  });
+
+  /* ---------- init ---------- */
+
+  var draft = storageGet();
+  textEl.value = (draft && typeof draft.text === "string") ? draft.text : "";
+  var draftChoices = (draft && Array.isArray(draft.choices))
+    ? draft.choices.filter(function (c) { return typeof c === "string"; })
+    : null;
+  setChoices(draftChoices && draftChoices.length ? draftChoices : ["", "", ""]);
+  // Count immediately; the limit fills in once /api/models has answered.
+  recount();
+  loadModels(draft && typeof draft.model === "string" ? draft.model : null)
+    .then(recount);
+})();
+</script>
+</body>
+</html>

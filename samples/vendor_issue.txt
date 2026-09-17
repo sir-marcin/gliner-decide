@@ -1,0 +1,4 @@
+The vendor missed the last two delivery deadlines and quality inspections
+show a 12% defect rate, well above our 2% threshold. However, switching
+suppliers now would delay the product launch by at least two months and
+they have offered a partial refund and a corrective action plan.

@@ -1,0 +1,7 @@
+Monitoring flagged unusual outbound traffic from a single application
+server at 2 a.m. The traffic pattern resembles a known data exfiltration
+signature, but it could also be a misconfigured backup job that started
+syncing to a new offsite location this week. Taking the server offline now
+would interrupt an active customer-facing batch job that runs until 6 a.m.
+No customer data access alerts have fired yet, and the security team is
+two hours away from being able to fully triage the logs.
