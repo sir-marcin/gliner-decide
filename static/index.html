@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GLiNER Decide</title>
+<title>Minos</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -358,7 +358,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>GLiNER Decide</h1>
+    <h1>Minos</h1>
     <p class="lede">Describe a situation, list the options, and see how well each one fits.</p>
   </header>
 
@@ -417,7 +417,9 @@
 
   var MIN_CHOICES = 2;
   var MAX_CHOICES = 20;
-  var STORAGE_KEY = "gliner-decide-draft-v1";
+  var STORAGE_KEY = "minos-draft-v1";
+  // Pre-rename key. Read once so a draft saved before the rename survives.
+  var LEGACY_STORAGE_KEY = "gliner-decide-draft-v1";
 
   // Mirrors of the server's own caps, for the hint and the live counter. The
   // server enforces them; these only keep the UI honest about what will be
@@ -507,6 +509,7 @@
   function storageGet() {
     try {
       var raw = window.localStorage.getItem(STORAGE_KEY);
+      if (!raw) raw = window.localStorage.getItem(LEGACY_STORAGE_KEY);
       if (!raw) return null;
       var parsed = JSON.parse(raw);
       return parsed && typeof parsed === "object" ? parsed : null;
@@ -524,6 +527,7 @@
   function storageClear() {
     try {
       window.localStorage.removeItem(STORAGE_KEY);
+      window.localStorage.removeItem(LEGACY_STORAGE_KEY);
     } catch (e) { /* ignore */ }
   }
 

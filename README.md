@@ -1,4 +1,4 @@
-# GLiNER Decide
+# Minos
 
 A small zero-shot "decision helper". You give it a text passage describing a
 situation plus a list of candidate choices, and it scores how well each choice
@@ -75,6 +75,11 @@ docs. Ctrl-C stops it.
    `GLINER_PORT=9000 GLINER_MAX_BATCH=4 ./install-service.sh`. Anything you do
    not set is left out, so `server.py`'s own defaults apply. It logs to
    `logs/server.log`. Re-run `install-service.sh` to change settings.
+
+   The agent's label is `com.minos.server`. It used to be
+   `com.gliner-decide.server`; `install-service.sh` retires an agent still
+   carrying the old label before installing the new one, and
+   `uninstall-service.sh` removes either.
 
    **This is a LaunchAgent in `gui/<uid>`, so it starts at *login*, not at
    boot.** A Mac that reboots and sits at the login window serves nothing until
@@ -552,7 +557,9 @@ Error: server returned HTTP 422:
 
 Environment variables, all read by `server.py`. `start.sh` and
 `install-service.sh` only pass through what you set - the defaults below live in
-one place, `server.py`, and nothing else repeats them:
+one place, `server.py`, and nothing else repeats them. They keep the `GLINER_`
+prefix after the rename to Minos: they configure the GLiNER2.5 backend, and
+renaming them would silently ignore every environment and plist already set up:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -647,7 +654,7 @@ both stdout and stderr:
 
 ```bash
 tail -f logs/server.log
-launchctl print gui/$(id -u)/com.gliner-decide.server   # state, pid, env
+launchctl print gui/$(id -u)/com.minos.server   # state, pid, env
 ```
 
 **Switching the default model.** Set `GLINER_MODEL` before starting:

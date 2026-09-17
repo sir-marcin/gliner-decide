@@ -89,7 +89,7 @@ from common import (
     resolve_model_name,
 )
 
-log = logging.getLogger("gliner.server")
+log = logging.getLogger("minos.server")
 
 HOST = os.environ.get("GLINER_HOST", DEFAULT_BIND_HOST)
 PORT = int(os.environ.get("GLINER_PORT", str(DEFAULT_PORT)))
@@ -354,7 +354,7 @@ async def lifespan(app: FastAPI):
 
 
 DESCRIPTION = """
-Zero-shot **decision helper** built on GLiNER2.5.
+Minos: a zero-shot **decision helper** built on GLiNER2.5.
 
 A *decision* is a text passage describing a situation plus a list of candidate
 choices. The model scores how well each choice fits the situation and returns
@@ -396,7 +396,7 @@ forward pass never times out its own request; only a wedged worker does, after a
 """
 
 app = FastAPI(
-    title="GLiNER Decide API",
+    title="Minos API",
     description=DESCRIPTION,
     version="1.0.0",
     lifespan=lifespan,
@@ -730,7 +730,7 @@ async def api_decide(req: DecideRequest) -> DecideResponse:
 def index():
     if INDEX_HTML.is_file():
         return FileResponse(INDEX_HTML)
-    return {"message": "GLiNER decide API. UI not installed.", "docs": "/docs"}
+    return {"message": "Minos API. UI not installed.", "docs": "/docs"}
 
 
 if __name__ == "__main__":

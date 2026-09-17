@@ -7,8 +7,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 PROJECT_DIR="$(pwd)"
-LABEL="com.gliner-decide.server"
+LABEL="com.minos.server"
+LEGACY_LABEL="com.gliner-decide.server"   # pre-rename; removed below if present
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 PYTHON="$PROJECT_DIR/.venv/bin/python"
 SERVER="$PROJECT_DIR/server.py"
 LOG="$PROJECT_DIR/logs/server.log"
@@ -46,6 +48,21 @@ plist_env() {
 
 mkdir -p "$PROJECT_DIR/logs"
 mkdir -p "$HOME/Library/LaunchAgents"
+
+# An agent installed under the old label would keep running and hold the port,
+# so retire it before installing the renamed one.
+if launchctl print "$TARGET/$LEGACY_LABEL" >/dev/null 2>&1; then
+    echo "Removing the pre-rename service $LEGACY_LABEL"
+    launchctl bootout "$TARGET/$LEGACY_LABEL" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+        launchctl print "$TARGET/$LEGACY_LABEL" >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+fi
+if [ -f "$LEGACY_PLIST" ]; then
+    rm -f "$LEGACY_PLIST"
+    echo "Removed $LEGACY_PLIST"
+fi
 
 LABEL_X="$(xml_escape "$LABEL")"
 PYTHON_X="$(xml_escape "$PYTHON")"
